@@ -47,10 +47,6 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      # 3. Setup Android SDK
-      - name: 📱 Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       # 4. Cache Gradle dependencies
       - name: 📦 Cache Gradle packages
         uses: actions/cache@v4
