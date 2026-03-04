@@ -1,0 +1,300 @@
+name: 🚀 Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'           # Trigger on version tags: v1.0.0, v1.2.3, etc.
+
+  workflow_dispatch:       # Allow manual trigger from GitHub UI
+    inputs:
+      release_type:
+        description: 'Release type'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+      version_name:
+        description: 'Version name (e.g. 1.0.0) — leave blank to use tag'
+        required: false
+        type: string
+
+jobs:
+  # ─────────────────────────────────────────
+  # JOB 1: Build APK & AAB
+  # ─────────────────────────────────────────
+  build:
+    name: 🔨 Build APK & AAB
+    runs-on: ubuntu-latest
+
+    outputs:
+      version_name: ${{ steps.version.outputs.version_name }}
+      version_code: ${{ steps.version.outputs.version_code }}
+
+    steps:
+      # 1. Checkout source code
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Full history for version calculation
+
+      # 2. Setup JDK 17
+      - name: ☕ Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      # 3. Setup Android SDK
+      - name: 📱 Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 4. Cache Gradle dependencies
+      - name: 📦 Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # 5. Calculate version info
+      - name: 🔢 Calculate version
+        id: version
+        run: |
+          # Use manual input, tag, or fallback to git commit count
+          if [ -n "${{ github.event.inputs.version_name }}" ]; then
+            VERSION_NAME="${{ github.event.inputs.version_name }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION_NAME="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION_NAME="0.0.$(git rev-list --count HEAD)"
+          fi
+
+          VERSION_CODE=$(git rev-list --count HEAD)
+
+          echo "version_name=${VERSION_NAME}" >> $GITHUB_OUTPUT
+          echo "version_code=${VERSION_CODE}" >> $GITHUB_OUTPUT
+          echo "📌 Version: ${VERSION_NAME} (code: ${VERSION_CODE})"
+
+      # 6. Grant execute permission for gradlew
+      - name: 🔧 Grant gradlew permission
+        run: chmod +x gradlew
+
+      # 7. Decode keystore from secret (if signing is set up)
+      - name: 🔑 Decode release keystore
+        if: ${{ env.KEYSTORE_BASE64 != '' }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > app/release.keystore
+          echo "✅ Keystore decoded"
+
+      # 8. Build Debug APK
+      - name: 🐛 Build Debug APK
+        run: |
+          ./gradlew assembleDebug \
+            -Pandroid.versionName=${{ steps.version.outputs.version_name }} \
+            -Pandroid.versionCode=${{ steps.version.outputs.version_code }} \
+            --stacktrace
+
+      # 9. Build Release APK (signed if keystore available)
+      - name: 📦 Build Release APK
+        env:
+          KEYSTORE_PATH: ${{ secrets.KEYSTORE_PATH || 'app/release.keystore' }}
+          KEY_ALIAS:     ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD:  ${{ secrets.KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+        run: |
+          ./gradlew assembleRelease \
+            -Pandroid.versionName=${{ steps.version.outputs.version_name }} \
+            -Pandroid.versionCode=${{ steps.version.outputs.version_code }} \
+            --stacktrace
+
+      # 10. Build Release AAB (for Google Play)
+      - name: 🎯 Build Release AAB (Google Play)
+        env:
+          KEY_ALIAS:      ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD:   ${{ secrets.KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+        run: |
+          ./gradlew bundleRelease \
+            -Pandroid.versionName=${{ steps.version.outputs.version_name }} \
+            -Pandroid.versionCode=${{ steps.version.outputs.version_code }} \
+            --stacktrace
+
+      # 11. Rename output files with version
+      - name: ✏️ Rename APK/AAB with version
+        run: |
+          VERSION="${{ steps.version.outputs.version_name }}"
+
+          # Find and rename debug APK
+          find app/build/outputs/apk/debug -name "*.apk" | while read f; do
+            mv "$f" "app/build/outputs/apk/debug/SmartTVLauncher-v${VERSION}-debug.apk"
+          done
+
+          # Find and rename release APK
+          find app/build/outputs/apk/release -name "*.apk" | while read f; do
+            mv "$f" "app/build/outputs/apk/release/SmartTVLauncher-v${VERSION}-release.apk"
+          done
+
+          # Find and rename AAB
+          find app/build/outputs/bundle/release -name "*.aab" | while read f; do
+            mv "$f" "app/build/outputs/bundle/release/SmartTVLauncher-v${VERSION}-release.aab"
+          done
+
+          echo "📁 Output files:"
+          find app/build/outputs -name "*.apk" -o -name "*.aab" | sort
+
+      # 12. Upload APKs as build artifacts
+      - name: ⬆️ Upload Debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk-v${{ steps.version.outputs.version_name }}
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+      - name: ⬆️ Upload Release APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk-v${{ steps.version.outputs.version_name }}
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 90
+
+      - name: ⬆️ Upload Release AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-aab-v${{ steps.version.outputs.version_name }}
+          path: app/build/outputs/bundle/release/*.aab
+          retention-days: 90
+
+
+  # ─────────────────────────────────────────
+  # JOB 2: Create GitHub Release
+  # ─────────────────────────────────────────
+  release:
+    name: 🎉 Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    # Only create release on tag push
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Download all build artifacts
+      - name: 📥 Download Release APK
+        uses: actions/download-artifact@v4
+        with:
+          name: release-apk-v${{ needs.build.outputs.version_name }}
+          path: ./dist/apk/
+
+      - name: 📥 Download Debug APK
+        uses: actions/download-artifact@v4
+        with:
+          name: debug-apk-v${{ needs.build.outputs.version_name }}
+          path: ./dist/apk-debug/
+
+      - name: 📥 Download Release AAB
+        uses: actions/download-artifact@v4
+        with:
+          name: release-aab-v${{ needs.build.outputs.version_name }}
+          path: ./dist/aab/
+
+      # Generate changelog from git log
+      - name: 📝 Generate changelog
+        id: changelog
+        run: |
+          VERSION="v${{ needs.build.outputs.version_name }}"
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${VERSION}$" | head -1)
+
+          if [ -n "$PREV_TAG" ]; then
+            COMMITS=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges | head -20)
+          else
+            COMMITS=$(git log --pretty=format:"- %s (%h)" --no-merges | head -20)
+          fi
+
+          CHANGELOG="## 📋 What's Changed\n\n${COMMITS}\n\n**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${VERSION}"
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # Create the GitHub Release
+      - name: 🚀 Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "📺 SmartTV Launcher v${{ needs.build.outputs.version_name }}"
+          body: |
+            ## 📺 SmartTV Launcher v${{ needs.build.outputs.version_name }}
+
+            ${{ steps.changelog.outputs.changelog }}
+
+            ---
+
+            ## 📦 Download
+
+            | File | Description |
+            |------|-------------|
+            | `SmartTVLauncher-v${{ needs.build.outputs.version_name }}-release.apk` | ✅ Release APK (Install on TV) |
+            | `SmartTVLauncher-v${{ needs.build.outputs.version_name }}-debug.apk` | 🐛 Debug APK (Testing) |
+            | `SmartTVLauncher-v${{ needs.build.outputs.version_name }}-release.aab` | 🎯 AAB Bundle (Google Play) |
+
+            ## 📱 Installation
+
+            1. Download the **Release APK**
+            2. Enable **Unknown Sources** on your Android TV
+            3. Transfer APK via USB or ADB:
+               ```bash
+               adb install SmartTVLauncher-v${{ needs.build.outputs.version_name }}-release.apk
+               ```
+            4. Set as **default launcher** in TV Settings
+
+            ## ℹ️ Build Info
+
+            - **Version Code**: `${{ needs.build.outputs.version_code }}`
+            - **Min SDK**: Android 5.0 (API 21)
+            - **Target SDK**: Android 14 (API 34)
+            - **Built on**: ${{ runner.os }}
+
+          files: |
+            ./dist/apk/*.apk
+            ./dist/apk-debug/*.apk
+            ./dist/aab/*.aab
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-rc') }}
+          generate_release_notes: false
+
+
+  # ─────────────────────────────────────────
+  # JOB 3: Notify on failure
+  # ─────────────────────────────────────────
+  notify:
+    name: 📣 Notify Build Status
+    runs-on: ubuntu-latest
+    needs: [build, release]
+    if: always()
+
+    steps:
+      - name: ✅ Build Success
+        if: needs.build.result == 'success'
+        run: |
+          echo "✅ Build succeeded!"
+          echo "Version: v${{ needs.build.outputs.version_name }}"
+          echo "Version Code: ${{ needs.build.outputs.version_code }}"
+
+      - name: ❌ Build Failed
+        if: needs.build.result == 'failure'
+        run: |
+          echo "❌ Build failed!"
+          exit 1

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.SmartTVLauncher" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:colorBackground">@android:color/black</item>
+        <item name="android:colorPrimary">#00AAFF</item>
+        <item name="android:colorPrimaryDark">#0055CC</item>
+        <item name="android:colorAccent">#00CCFF</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowTranslucentStatus">true</item>
+        <item name="android:windowTranslucentNavigation">true</item>
+
+        <!-- TV-specific: Use D-pad navigation -->
+        <item name="android:descendantFocusability">beforeDescendants</item>
+
+        <!-- Focus ring color -->
+        <item name="colorControlHighlight">#3300AAFF</item>
+    </style>
+
+    <style name="AppWidget.Title" parent="@style/Theme.SmartTVLauncher">
+        <item name="android:textColor">#FFFFFF</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+    </style>
+</resources>
